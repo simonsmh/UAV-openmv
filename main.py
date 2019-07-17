@@ -14,14 +14,13 @@ sensor.set_pixformat(sensor.GRAYSCALE)
 # VGA640*480 分割400x300进Buffer 镜头矫正1.5
 sensor.set_framesize(sensor.VGA)
 sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
-sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
+sensor.set_auto_gain(False,gain_db=15) # 画面明亮时调低gain
 #sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
 sensor.set_auto_exposure(True, exposure_us = 20000)
 sensor.skip_frames(time = 2000)
 #
 clock = time.clock()
-m = mjpeg.Mjpeg("test_%s.mjpeg"%pyb.rng())
-g = gif.Gif("test_%s.gif"%pyb.rng())
+
 
 """
 USART 通信
@@ -83,16 +82,48 @@ PORT = 8080         # Arbitrary non-privileged port
 
 
 """
-姿态识别解算控制
+视频录制
 """
 
-judge_flag = 1
+def saveVideo(save_start=1,frames=100000,format='mjpeg'):
+    global save_flag
+    if save_flag:
+        global FRAMES
+        if format == 'mjpeg':
+            global m
+        else:
+            global g
+        if save_start == 0:
+            LED(3).on()
+            if format == 'mjpeg':
+                m = mjpeg.Mjpeg("test_%s.mjpeg"%pyb.rng())
+            else:
+                g = gif.Gif("test_%s.gif"%pyb.rng())
+            FRAMES = frames
+            save_start = 1
+        elif save_start == 1:
+            global img
+            #记录帧
+            if FRAMES > 0:
+                if format == 'mjpeg':
+                    m.add_frame(img,quality=30)
+                else:
+                    g.add_frame(img,delay=6) #10FPS
+                FRAMES -= 1
+            else:
+                save_start = 2
+        else:
+            LED(3).off()
+            if format == 'mjpeg':
+                m.close(clock.fps())
+            else:
+                g.close()
+            save_flag = 0
+            save_start = 0
 
-def saveVideo():
-    global FRAMES
-    #m.close(clock.fps())
-    g.close()
-    FRAMES = 999999
+"""
+姿态识别解算控制
+"""
 
 def judge_stop():
     send_direction_packet(S,0)
@@ -102,7 +133,7 @@ def judge_end():
     judge_flag = 0
     send_direction_packet(E,0)
     LED(2).on()
-    saveVideo()
+    saveVideo(2)
     #uart.write("\r\n###SUCCESS###")
 
 def judge_direction(blob,speed=5):
@@ -153,47 +184,53 @@ def compareBlob(blob_1,blob_2):
 """
 
 THRESHOLD = [(255,255),(0, 40)]
-FRAMES = 0
 state_flag = 0
-while(True):
+save_flag = 0
+judge_flag = 1
 
-    while (state_flag == 0):       #等待接受任务信号
-        if uart.readchar() == H:
-            state_flag = 1
-        else :
-            state_flag = 0
+while(True):
+    ##等待接受任务信号
+    #while (state_flag == 0):
+        #if uart.readchar() == H:
+            #state_flag = 1
+            #saveVideo(0,frames=5000)
+        #else :
+            #state_flag = 0
+    #调试
+    if (state_flag == 0):
+        state_flag = 1
+        saveVideo(0,frames=5000)
 
     clock.tick()
-    img = sensor.snapshot().lens_corr(1.28)#.binary([THRESHOLD[1]])
-
-    blobs = img.find_blobs([THRESHOLD[1]], pixels_threshold=1000, area_threshold=500, merge=True)
+    img = sensor.snapshot().lens_corr(1.4)#.binary([THRESHOLD[1]])
+    blobs_pre = img.find_blobs([THRESHOLD[1]], pixels_threshold=300, margin=5, merge=True)
+    blobs = []
+    if len(blobs_pre):
+        #预检过滤非圆物块
+        for blob in blobs_pre:
+            if blob.roundness() > 0.75:
+                blobs.append(blob)
     if len(blobs):
-        #最近物块
+        #物块巡航
         near_blob = blobs[0]
         for blob in blobs:
             near_blob = compareBlob(near_blob, blob)
             img.draw_rectangle(blob.rect())
             img.draw_cross(blob.cx(), blob.cy())
-            print(blob)
+            print(blob.roundness())
         judge_direction(near_blob)
         img.draw_line(WINDOW_CENTER_X, WINDOW_CENTER_Y, near_blob.cx(), near_blob.cy())
     else:
         judge_stop()
 
-    #感光度校准
-    if (len(blobs) == 0 and sensor.get_gain_db() > 15):
+    #感光度自动调节 范围11-16左右
+    if (len(blobs_pre) == 0 and sensor.get_gain_db() > 11):
         sensor.set_auto_gain(False,gain_db=sensor.get_gain_db()*0.9) # 画面明亮时调低gain
-    if (len(blobs) >= 3 and sensor.get_gain_db() < 20):
-        sensor.set_auto_gain(False,gain_db=sensor.get_gain_db()*1.2) # 画面过暗时调高gain,稳定性差
+    if (len(blobs_pre) >= 3 and sensor.get_gain_db() < 16):
+        sensor.set_auto_gain(False,gain_db=sensor.get_gain_db()*1.3) # 画面过暗时调高gain,稳定性差
 
     img.draw_cross(WINDOW_CENTER_X, WINDOW_CENTER_Y)
-    img.draw_string(0, 0, "GAIN: %s"%sensor.get_gain_db())
-    img.draw_string(0, 8, "FPS:  %s"%clock.fps())
+    img.draw_string(0, 0, "GAIN: %s"%sensor.get_gain_db(),scale=2,mono_space=False)
+    img.draw_string(0, 16, "FPS: %s"%clock.fps(),scale=2,mono_space=False)
 
-    #保存
-    if FRAMES < 10:
-        #m.add_frame(img)
-        g.add_frame(img)
-        FRAMES += 1
-    elif FRAMES==100000:
-        saveVideo()
+    saveVideo()
