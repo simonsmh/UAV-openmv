@@ -235,7 +235,12 @@ def LineDistanceToCenter(line):
     return DistanceToCenter(x,y)
 
 def DistanceToLine(line):
-    pass
+    a = line.y2() - line.y1()
+    b = line.x1() - line.x2()
+    c = line.x2() * line.y1() - line.x1() * line.y2()
+    (cx,cy) = LineCenter(line)
+    dis = abs(a * WINDOW_CENTER_X + b * WINDOW_CENTER_Y + c) / math.sqrt( math.pow(a,2) + math.pow(b,2) );
+    return dis
 
 def VerticleAngle(line):
     return 90-abs(line.theta()-90)
@@ -245,7 +250,8 @@ def HorizonAngle(line):
 
 def CompareLine(line_1,line_2):
     #大小 (最小)
-    tmp = LineDistanceToCenter(line_1) - LineDistanceToCenter(line_2)
+    #tmp = LineDistanceToCenter(line_1) - LineDistanceToCenter(line_2)
+    tmp = DistanceToLine(line_1) - DistanceToLine(line_2)
     #竖直 (最小)
     #tmp = VerticleAngle(line_1) - VerticleAngle(line_2)
     #水平 (最小)
@@ -287,7 +293,7 @@ while(True):
             #state_flag = 0
     #调试
     if state_flag == 0:
-        state_flag = 2
+        state_flag = 3
         saveVideo(0,frames=5000)
 
     clock.tick()
@@ -327,8 +333,9 @@ while(True):
             near_line = lines_pre[0]
             for line in lines_pre:
                 near_line = CompareLine(near_line, line)
+                img.draw_line(line.line())
             judge_direction_line(near_line)
-            img.draw_line(near_line.line())
+            img.draw_line(near_line.line(),thickness=4)
         else:
             judge_stop()
 
@@ -343,6 +350,19 @@ while(True):
                 #print(cross_x,cross_y)
 
         ISO_Tune(len(lines_pre))
+
+    #if state_flag == 3:
+        #########
+        ##线性回归巡线
+        #reg = img.get_regression([THRESHOLD[1]])
+
+        #if (reg):
+            #img.draw_line(reg.line())
+            #print(reg)
+
+
+
+
 
     img.draw_cross(WINDOW_CENTER_X, WINDOW_CENTER_Y)
     img.draw_string(0, 0, "GAIN: %s"%sensor.get_gain_db(),scale=2,mono_space=False)
