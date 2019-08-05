@@ -11,23 +11,24 @@ import network
 import pyb
 import sensor
 import usocket
+from machine import Pin
 
 """
 单板初始化
 """
 
-WINDOW_CENTER_X = 264
-WINDOW_CENTER_Y = 240
+WINDOW_CENTER_X = 160#264
+WINDOW_CENTER_Y = 120#240
 
 sensor.reset()
 sensor.set_pixformat(sensor.GRAYSCALE)
 # VGA640*480 分割400x300进Buffer 镜头矫正1.5
-sensor.set_framesize(sensor.VGA)
+sensor.set_framesize(sensor.QVGA)
 sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
-sensor.set_auto_gain(False,gain_db=15) # 画面明亮时调低gain
-#sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
-sensor.set_auto_exposure(True, exposure_us = 20000)
 sensor.skip_frames(time = 2000)
+#sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
+#sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
+#sensor.set_auto_exposure(True, exposure_us = 20000)
 #
 clock = time.clock()
 
@@ -48,20 +49,22 @@ U = ord('U')
 D = ord('D')
 E = ord('E')
 H = ord('H')
+I = ord('I')
 
 # USART 初始化
-uart = pyb.UART(3, 500000, timeout_char=1000)
+uart = pyb.UART(3, 115200, timeout_char=1000)
 
 # USART 串口协议
 def send_direction_packet(direct,velcity):
     s = 0xAA+0x8C+direct+(int(velcity/256))+(int(velcity%256))
     s = int(s % 256)
-    temp_flow = struct.pack("<BBBBhB",
+    temp_flow = struct.pack("<BBBBBhB",
+                   0x00,
                    0xAA,
                    0x89,
-                   03,
+                   3,
                    direct,
-                   velcity,
+                   int(velcity),
                    s)
     uart.write(temp_flow)
 
@@ -71,9 +74,9 @@ def send_yaw_packet(direct,velcity):
     temp_flow = struct.pack("<BBBBhB",
                    0xAA,
                    0x98,
-                   03,
+                   3,
                    direct,
-                   velcity,
+                   int(velcity),
                    s)
     uart.write(temp_flow)
 
@@ -132,10 +135,21 @@ def saveVideo(save_start=1,frames=100000,format='mjpeg'):
             save_start = 0
 
 """
+Pin中断控制
+"""
+def pin_handler(pin0):
+    saveVideo(2)
+    pin0.irq(trigger=0)
+
+pin0 = Pin('P7', Pin.IN, Pin.PULL_UP)
+pin0.irq(handler=pin_handler, trigger=Pin.IRQ_RISING)
+
+"""
 姿态识别解算控制
 """
 
 def judge_stop():
+    pyb.LED(1).on()
     send_direction_packet(S,0)
 
 def judge_end():
@@ -146,24 +160,32 @@ def judge_end():
     saveVideo(2)
     #uart.write("\r\n###SUCCESS###")
 
-def judge_direction_blob(blob,speed=5):
-    x_cal=WINDOW_CENTER_X-blob.cx()
-    y_cal=WINDOW_CENTER_Y-blob.cy()
+def judge_direction_blob(blob, speed=10):
+    global img
+    pyb.LED(1).off()
+    x_cal=blob.cx()-WINDOW_CENTER_X
+    y_cal=blob.cy()-WINDOW_CENTER_Y
     if judge_flag == 1:
-        if abs(x_cal) > 5 or abs(y_cal) > 5:
-            if x_cal < 0:
+        if abs(x_cal) > 10 or abs(y_cal) > 10:
+            if x_cal > 0:
+                img.draw_string(2, 64, "R",color=128,scale=2,mono_space=False)
                 send_direction_packet(R,speed)
             else:
+                img.draw_string(2, 64, "L",color=128,scale=2,mono_space=False)
                 send_direction_packet(L,speed)
-            if y_cal < 0:
+            if y_cal > 0:
+                img.draw_string(18, 64, "B",color=128,scale=2,mono_space=False)
                 send_direction_packet(B,speed)
             else:
+                img.draw_string(18, 64, "G",color=128,scale=2,mono_space=False)
                 send_direction_packet(G,speed)
         else:
+            img.draw_string(2, 64, "E",color=128,scale=2,mono_space=False)
             judge_end()
 
-def judge_direction_line(line,speed=5):
-    x_cal=WINDOW_CENTER_X-(line.x1()+line.x2())/2
+def judge_direction_line(line, speed=2):
+    pyb.LED(1).off()
+    x_cal=(line.x1()+line.x2())/2-WINDOW_CENTER_X
     theta=line.theta()-90
     t_speed=(90-abs(theta))*20
     if judge_flag == 1:
@@ -176,7 +198,7 @@ def judge_direction_line(line,speed=5):
         else:
             send_direction_packet(F,0)
         if abs(x_cal) > 10:
-            if x_cal < 0:
+            if x_cal > 0:
                 send_direction_packet(R,speed)
             else:
                 send_direction_packet(L,speed)
@@ -251,9 +273,9 @@ def HorizonAngle(line):
 def CompareLine(line_1,line_2):
     #大小 (最小)
     #tmp = LineDistanceToCenter(line_1) - LineDistanceToCenter(line_2)
-    tmp = DistanceToLine(line_1) - DistanceToLine(line_2)
+    #tmp = DistanceToLine(line_1) - DistanceToLine(line_2)
     #竖直 (最小)
-    #tmp = VerticleAngle(line_1) - VerticleAngle(line_2)
+    tmp = VerticleAngle(line_1) - VerticleAngle(line_2)
     #水平 (最小)
     #tmp = HorizonAngle(line_1) - HorizonAngle(line_2)
     if tmp > 0:
@@ -278,36 +300,67 @@ def ISO_Tune(amount):
 主循环
 """
 
-THRESHOLD = [(255,255),(0, 40)]
+THRESHOLD = [(255,255),(0, 9)]
 state_flag = 0
-save_flag = 0
+save_flag = 1
 judge_flag = 1
+DEBUG = 1
 
 while(True):
     ##等待接受任务信号
-    #while (state_flag == 0):
-        #if uart.readchar() == H:
-            #state_flag = 1
-            #saveVideo(0,frames=5000)
-        #else :
-            #state_flag = 0
-    #调试
-    if state_flag == 0:
-        state_flag = 3
-        saveVideo(0,frames=5000)
+    if DEBUG:
+        if state_flag == 0:
+             state_flag = 1
+             saveVideo(0,frames=5000)
+    else:
+        while (state_flag == 0):
+            pyb.LED(1).on()
+            if uart.readchar() == H:
+                state_flag = 1
+                saveVideo(0,frames=5000)
+                pyb.LED(1).off()
+            else :
+                state_flag = 0
 
     clock.tick()
-    img = sensor.snapshot().lens_corr(1.7)#.binary([THRESHOLD[1]])
+    img = sensor.snapshot().lens_corr(1.8)
+    temp_threshold = img.get_histogram().get_threshold().value() #Otsu
+    img = img.binary([(0,temp_threshold)]).erode(7)
+    roi = (0, 0, WINDOW_CENTER_X * 2, WINDOW_CENTER_Y * 2)
 
-    if state_flag == 1:
+    if temp_threshold > 140:
+        judge_stop()
+    if state_flag == -1:
+        pyb.delay(1000)
+        send_direction_packet(G,10)
+        pyb.delay(1500)
+        send_direction_packet(S,0)
+        pyb.delay(200)
+        send_direction_packet(L,10)
+        pyb.delay(1500)
+        send_direction_packet(S,0)
+        pyb.delay(200)
+        send_direction_packet(B,10)
+        pyb.delay(1500)
+        send_direction_packet(S,0)
+        pyb.delay(200)
+        send_direction_packet(R,10)
+        pyb.delay(1500)
+        send_direction_packet(S,0)
+        pyb.delay(200)
+        judge_end()
+        pyb.delay(100000)
+    elif state_flag == 1:
         ########
-        #圆形色块
-        blobs_pre = img.find_blobs([THRESHOLD[1]], roi=(0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2), pixels_threshold=300, margin=5, merge=True)
+        #中心区域的圆形色块
+        roi = (0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2)
+        # roi = (round(WINDOW_CENTER_X/2),round(WINDOW_CENTER_X/2),WINDOW_CENTER_X,WINDOW_CENTER_Y)
+        blobs_pre = img.find_blobs([THRESHOLD[0]], roi=roi, pixels_threshold=100, merge=False) #.gaussian(1, threshold=True, offset=20, invert=True)
         blobs = []
         if len(blobs_pre):
             #预检过滤非圆物块
             for blob in blobs_pre:
-                if blob.roundness() > 0.80:
+                if blob.roundness():
                     blobs.append(blob)
         if len(blobs):
             #物块巡航
@@ -322,12 +375,13 @@ while(True):
         else:
             judge_stop()
 
-        ISO_Tune(len(blobs_pre))
+        #ISO_Tune(len(blobs_pre))
 
-    if state_flag == 2:
+    elif state_flag == 2:
         ########
         #巡线/寻直角
-        lines_pre = img.find_lines(x_stride=2, y_stride=1, roi=(0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2), threshold=5000, theta_margin=40, rho_margin=30)
+        roi = (round(WINDOW_CENTER_X/2),0,WINDOW_CENTER_X,WINDOW_CENTER_Y*2)
+        lines_pre = img.histeq().find_lines(x_stride=2, y_stride=2, roi=roi, threshold=3000, theta_margin=40, rho_margin=30)
 
         if len(lines_pre):
             near_line = lines_pre[0]
@@ -335,37 +389,56 @@ while(True):
                 near_line = CompareLine(near_line, line)
                 img.draw_line(line.line())
             judge_direction_line(near_line)
+
+            #寻找不到色块后进入下一个模式
+            roi_2 = (0,0,WINDOW_CENTER_X*2,round(WINDOW_CENTER_Y/4))
+            blobs = img.find_blobs([THRESHOLD[1]], roi=roi_2, pixels_threshold=300, margin=5, merge=True)
+            if len(blobs) == 0:
+                state_flag
+            img.draw_rectangle(roi_2)
+
             img.draw_line(near_line.line(),thickness=4)
         else:
             judge_stop()
 
-        lines=LineVertical(lines_pre)
-        crosses=[]
-        if len(lines):
-            for (line_1,line_2) in lines:
+        # lines=LineVertical(lines_pre)
+        # crosses=[]
+        # if len(lines):
+        #     for (line_1,line_2) in lines:
                 #img.draw_line(line_1.line())
                 #img.draw_line(line_2.line())
-                crosses.append(LineCrossCenter(line_1,line_2))
+                # crosses.append(LineCrossCenter(line_1,line_2))
                 #img.draw_circle(cross_x,cross_y,4)
                 #print(cross_x,cross_y)
 
-        ISO_Tune(len(lines_pre))
+        #ISO_Tune(len(lines_pre))
 
-    #if state_flag == 3:
-        #########
-        ##线性回归巡线
-        #reg = img.get_regression([THRESHOLD[1]])
+    elif state_flag == 3:
+        ########
+        #线性回归巡直线
+        roi = (round(WINDOW_CENTER_X/2),0,WINDOW_CENTER_X,WINDOW_CENTER_Y*2)
+        reg = img.histeq().get_regression([THRESHOLD[1]], roi=roi, x_stride=2, y_stride=1, area_threshold=10, pixels_threshold=10)
 
-        #if (reg):
-            #img.draw_line(reg.line())
-            #print(reg)
+        if (reg):
+            judge_direction_line(reg)
 
+            #寻找色块后进入下一个模式
+            roi_2 = (0,round(7*WINDOW_CENTER_Y/4),WINDOW_CENTER_X*2,round(WINDOW_CENTER_Y/4))
+            blobs = img.find_blobs([THRESHOLD[1]], roi=roi_2, pixels_threshold=300, margin=5, merge=True)
+            if len(blobs):
+                state_flag
+            img.draw_rectangle(roi_2)
 
+            img.draw_line(reg.line(),thickness=4)
+        else:
+            judge_stop()
 
-
-
+    img.draw_rectangle(roi)
     img.draw_cross(WINDOW_CENTER_X, WINDOW_CENTER_Y)
-    img.draw_string(0, 0, "GAIN: %s"%sensor.get_gain_db(),scale=2,mono_space=False)
-    img.draw_string(0, 16, "FPS: %s"%clock.fps(),scale=2,mono_space=False)
+    img.draw_string(2, 0, "GAIN: %s"%sensor.get_gain_db(),color=128,scale=2,mono_space=False)
+    img.draw_string(2, 16, "FPS: %s"%clock.fps(),color=128,scale=2,mono_space=False)
+    img.draw_string(2, 32, "STATE_FLAG: %s"%state_flag,color=128,scale=2,mono_space=False)
+    img.draw_string(2, 48, "THRESHOLD: %s"%temp_threshold,color=128,scale=2,mono_space=False)
+
 
     saveVideo()
