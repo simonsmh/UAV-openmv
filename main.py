@@ -11,25 +11,14 @@ import network
 import pyb
 import sensor
 import usocket
+import utime
 from machine import Pin
 
 """
 单板初始化
 """
 
-WINDOW_CENTER_X = 160#264
-WINDOW_CENTER_Y = 120#240
 
-sensor.reset()
-sensor.set_pixformat(sensor.GRAYSCALE)
-# VGA640*480 分割400x300进Buffer 镜头矫正1.5
-sensor.set_framesize(sensor.QVGA)
-sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
-sensor.skip_frames(time = 2000)
-#sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
-#sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
-#sensor.set_auto_exposure(True, exposure_us = 20000)
-#
 clock = time.clock()
 
 
@@ -137,12 +126,54 @@ def saveVideo(save_start=1,frames=100000,format='mjpeg'):
 """
 Pin中断控制
 """
-def pin_handler(pin0):
-    saveVideo(2)
-    pin0.irq(trigger=0)
+record_pin = Pin('P7', Pin.IN, Pin.PULL_UP)
 
-pin0 = Pin('P7', Pin.IN, Pin.PULL_UP)
-pin0.irq(handler=pin_handler, trigger=Pin.IRQ_RISING)
+def record_pin_handler(record_pin):
+    saveVideo(2)
+    record_pin.irq(trigger=0)
+
+record_pin.irq(handler=record_pin_handler, trigger=Pin.IRQ_RISING)
+
+
+"""
+超声波中断控制
+"""
+wave_echo_pin = Pin('P8', Pin.IN, Pin.PULL_NONE)
+wave_trig_pin = Pin('P9', Pin.OUT_PP, Pin.PULL_DOWN)
+
+wave_distance = 0
+tim_counter = 0
+flag_wave = 0
+
+def wave_distance_process():
+    global flag_wave
+    if flag_wave == 0:
+        wave_trig_pin.value(0)
+        utime.sleep_us(2)
+        wave_trig_pin.value(1)
+        utime.sleep_us(15)
+        wave_trig_pin.value(0)
+    elif flag_wave == 2:
+        global tim_counter
+        global wave_distance
+        wave_distance = tim_counter*0.017
+        flag_wave = 0
+
+def wave_handler(line):
+    global flag_wave
+    global tim_counter
+    if wave_echo_pin.value():
+        tim.init(prescaler=240, period=65535)
+        flag_wave = 1
+    else:
+        tim.deinit()
+        tim_counter = tim.counter()
+        tim.counter(0)
+        flag_wave = 2
+
+tim =pyb.Timer(2, prescaler=240, period=65535)  #相当于freq=1M
+extint = pyb.ExtInt(wave_echo_pin, pyb.ExtInt.IRQ_RISING_FALLING, pyb.Pin.PULL_DOWN, wave_handler)
+
 
 """
 姿态识别解算控制
@@ -163,44 +194,53 @@ def judge_end():
 def judge_direction_blob(blob, speed=10):
     global img
     pyb.LED(1).off()
-    x_cal=blob.cx()-WINDOW_CENTER_X
-    y_cal=blob.cy()-WINDOW_CENTER_Y
+    x_cal = blob.cx() - WINDOW_CENTER_X
+    y_cal = blob.cy() - WINDOW_CENTER_Y
+    x_speed = min(speed, x_cal)
+    y_speed = min(speed, y_cal)
     if judge_flag == 1:
         if abs(x_cal) > 10 or abs(y_cal) > 10:
             if x_cal > 0:
                 img.draw_string(2, 64, "R",color=128,scale=2,mono_space=False)
-                send_direction_packet(R,speed)
+                send_direction_packet(R,x_speed)
             else:
                 img.draw_string(2, 64, "L",color=128,scale=2,mono_space=False)
-                send_direction_packet(L,speed)
+                send_direction_packet(L,x_speed)
             if y_cal > 0:
                 img.draw_string(18, 64, "B",color=128,scale=2,mono_space=False)
-                send_direction_packet(B,speed)
+                send_direction_packet(B,y_speed)
             else:
                 img.draw_string(18, 64, "G",color=128,scale=2,mono_space=False)
-                send_direction_packet(G,speed)
+                send_direction_packet(G,y_speed)
         else:
             img.draw_string(2, 64, "E",color=128,scale=2,mono_space=False)
             judge_end()
 
-def judge_direction_line(line, speed=2):
+def judge_direction_line(line, speed=5):
     pyb.LED(1).off()
     x_cal=(line.x1()+line.x2())/2-WINDOW_CENTER_X
     theta=line.theta()-90
-    t_speed=(90-abs(theta))*20
+    t_speed=(90-abs(theta))*80
     if judge_flag == 1:
+        #if temp_threshold > 140:
+            #judge_end()
+        #else:
         send_direction_packet(G,speed)
         if t_speed > 4:
             if theta < 0:
+                img.draw_string(18, 64, "F",color=128,scale=2,mono_space=False)
                 send_direction_packet(F,t_speed)
             else:
+                img.draw_string(18, 64, "C",color=128,scale=2,mono_space=False)
                 send_direction_packet(C,t_speed)
         else:
             send_direction_packet(F,0)
         if abs(x_cal) > 10:
             if x_cal > 0:
+                img.draw_string(2, 64, "R",color=128,scale=2,mono_space=False)
                 send_direction_packet(R,speed)
             else:
+                img.draw_string(2, 64, "L",color=128,scale=2,mono_space=False)
                 send_direction_packet(L,speed)
 
 def DistanceToCenter(x,y):
@@ -296,40 +336,87 @@ def ISO_Tune(amount):
         sensor.set_auto_gain(False,gain_db=sensor.get_gain_db()*1.3) # 画面过暗时调高gain,稳定性差
 
 
+
+def Res_init():
+    global WINDOW_CENTER_X
+    global WINDOW_CENTER_Y
+    global RES
+    if RES == 1:
+        # lenscorr
+        WINDOW_CENTER_X=264
+        WINDOW_CENTER_Y=240
+        sensor.reset()
+        sensor.set_pixformat(sensor.GRAYSCALE)
+        # VGA640*480 分割400x300进Buffer 镜头矫正1.5
+        sensor.set_framesize(sensor.VGA)
+        sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
+        sensor.skip_frames(time = 2000)
+        #sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
+        #sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
+        #sensor.set_auto_exposure(True, exposure_us = 20000)
+        RES = 0
+    if RES == 2:
+        # find_qrcodes
+        WINDOW_CENTER_X=240
+        WINDOW_CENTER_Y=240
+        sensor.reset()
+        sensor.set_pixformat(sensor.GRAYSCALE)
+        # VGA640*480 分割400x300进Buffer 镜头矫正1.5
+        sensor.set_framesize(sensor.VGA)
+        sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
+        sensor.skip_frames(time = 2000)
+        #sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
+        #sensor.set_auto_whitebal(True,(-5.5, -6.5, -3)) # must be turned off for color tracking
+        #sensor.set_auto_exposure(True, exposure_us = 20000)
+        RES = 0
+    elif RES == 3:
+        WINDOW_CENTER_X=160
+        WINDOW_CENTER_Y=120
+        sensor.reset()
+        sensor.set_pixformat(sensor.RGB565)
+        # VGA640*480 分割400x300进Buffer 镜头矫正1.5
+        sensor.set_framesize(sensor.QVGA)
+        sensor.set_windowing((WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2))
+        sensor.skip_frames(time = 2000)
+        #sensor.set_auto_gain(False,gain_db=20) # 画面明亮时调低gain
+        sensor.set_auto_whitebal(False) # must be turned off for color tracking
+        #sensor.set_auto_exposure(True, exposure_us = 20000)
+        RES = 0
+
+
 """
 主循环
 """
 
 THRESHOLD = [(255,255),(0, 9)]
 state_flag = 0
-save_flag = 1
+save_flag = 0
 judge_flag = 1
+NUM = 0
 DEBUG = 1
 
 while(True):
     ##等待接受任务信号
     if DEBUG:
         if state_flag == 0:
-             state_flag = 1
+             state_flag = 3
              saveVideo(0,frames=5000)
+             RES=3
     else:
         while (state_flag == 0):
             pyb.LED(1).on()
             if uart.readchar() == H:
-                state_flag = 1
+                state_flag = 3
                 saveVideo(0,frames=5000)
                 pyb.LED(1).off()
             else :
                 state_flag = 0
 
+    Res_init()
+    #roi = (0, 0, WINDOW_CENTER_X * 2, WINDOW_CENTER_Y * 2)
+    #img = img#.binary([(0,min(125,temp_threshold))])
     clock.tick()
-    img = sensor.snapshot().lens_corr(1.8)
-    temp_threshold = img.get_histogram().get_threshold().value() #Otsu
-    img = img.binary([(0,temp_threshold)]).erode(7)
-    roi = (0, 0, WINDOW_CENTER_X * 2, WINDOW_CENTER_Y * 2)
 
-    if temp_threshold > 140:
-        judge_stop()
     if state_flag == -1:
         pyb.delay(1000)
         send_direction_packet(G,10)
@@ -350,38 +437,44 @@ while(True):
         pyb.delay(200)
         judge_end()
         pyb.delay(100000)
-    elif state_flag == 1:
-        ########
-        #中心区域的圆形色块
-        roi = (0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2)
-        # roi = (round(WINDOW_CENTER_X/2),round(WINDOW_CENTER_X/2),WINDOW_CENTER_X,WINDOW_CENTER_Y)
-        blobs_pre = img.find_blobs([THRESHOLD[0]], roi=roi, pixels_threshold=100, merge=False) #.gaussian(1, threshold=True, offset=20, invert=True)
-        blobs = []
-        if len(blobs_pre):
-            #预检过滤非圆物块
-            for blob in blobs_pre:
-                if blob.roundness():
-                    blobs.append(blob)
-        if len(blobs):
-            #物块巡航
-            near_blob = blobs[0]
-            for blob in blobs:
-                near_blob = CompareBlob(near_blob, blob)
-                img.draw_rectangle(blob.rect())
-                img.draw_cross(blob.cx(), blob.cy())
-                print(blob.roundness())
-            judge_direction_blob(near_blob)
-            img.draw_line(WINDOW_CENTER_X, WINDOW_CENTER_Y, near_blob.cx(), near_blob.cy())
-        else:
-            judge_stop()
 
-        #ISO_Tune(len(blobs_pre))
+    #elif state_flag == 1:
+
+        #if temp_threshold > 140:
+            #judge_stop()
+        #else:
+            #########
+            ##中心区域的圆形色块
+            #roi = (0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2)
+            ## roi = (round(WINDOW_CENTER_X/2),round(WINDOW_CENTER_Y/2),WINDOW_CENTER_X,WINDOW_CENTER_Y)
+            #blobs_pre = img.erode(7).find_blobs([THRESHOLD[0]], roi=roi, pixels_threshold=100, merge=False) #.gaussian(1, threshold=True, offset=20, invert=True)
+            #blobs = []
+            #if len(blobs_pre):
+                ##预检过滤非圆物块
+                #for blob in blobs_pre:
+                    #if blob.roundness():
+                        #blobs.append(blob)
+            #if len(blobs):
+                ##物块巡航
+                #near_blob = blobs[0]
+                #for blob in blobs:
+                    #near_blob = CompareBlob(near_blob, blob)
+                    #img.draw_rectangle(blob.rect())
+                    #img.draw_cross(blob.cx(), blob.cy())
+                    #print(blob.roundness())
+                #judge_direction_blob(near_blob)
+                #img.draw_line(WINDOW_CENTER_X, WINDOW_CENTER_Y, near_blob.cx(), near_blob.cy())
+            #else:
+                #judge_stop()
+            ##ISO_Tune(len(blobs_pre))
 
     elif state_flag == 2:
+
+        img = sensor.snapshot().lens_corr(1.8)
         ########
         #巡线/寻直角
-        roi = (round(WINDOW_CENTER_X/2),0,WINDOW_CENTER_X,WINDOW_CENTER_Y*2)
-        lines_pre = img.histeq().find_lines(x_stride=2, y_stride=2, roi=roi, threshold=3000, theta_margin=40, rho_margin=30)
+        roi = (0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2)
+        lines_pre = img.find_lines(x_stride=2, y_stride=2, roi=roi, threshold=1000, theta_margin=40, rho_margin=30)
 
         if len(lines_pre):
             near_line = lines_pre[0]
@@ -390,55 +483,95 @@ while(True):
                 img.draw_line(line.line())
             judge_direction_line(near_line)
 
-            #寻找不到色块后进入下一个模式
-            roi_2 = (0,0,WINDOW_CENTER_X*2,round(WINDOW_CENTER_Y/4))
-            blobs = img.find_blobs([THRESHOLD[1]], roi=roi_2, pixels_threshold=300, margin=5, merge=True)
-            if len(blobs) == 0:
-                state_flag
-            img.draw_rectangle(roi_2)
 
-            img.draw_line(near_line.line(),thickness=4)
+            img.draw_line(near_line.line(),color=128,thickness=4)
         else:
             judge_stop()
 
-        # lines=LineVertical(lines_pre)
-        # crosses=[]
-        # if len(lines):
-        #     for (line_1,line_2) in lines:
-                #img.draw_line(line_1.line())
-                #img.draw_line(line_2.line())
-                # crosses.append(LineCrossCenter(line_1,line_2))
-                #img.draw_circle(cross_x,cross_y,4)
-                #print(cross_x,cross_y)
+        lines=LineVertical(lines_pre)
+        crosses=[]
+        if len(lines):
+            for (line_1,line_2) in lines:
+                img.draw_line(line_1.line())
+                img.draw_line(line_2.line())
+                crosses.append(LineCrossCenter(line_1,line_2))
+                for (cross_x,cross_y) in crosses:
+                    img.draw_circle(cross_x,cross_y,4)
+                    print(cross_x,cross_y)
 
-        #ISO_Tune(len(lines_pre))
+        ISO_Tune(len(lines_pre))
 
     elif state_flag == 3:
-        ########
-        #线性回归巡直线
-        roi = (round(WINDOW_CENTER_X/2),0,WINDOW_CENTER_X,WINDOW_CENTER_Y*2)
-        reg = img.histeq().get_regression([THRESHOLD[1]], roi=roi, x_stride=2, y_stride=1, area_threshold=10, pixels_threshold=10)
 
-        if (reg):
-            judge_direction_line(reg)
+        img = sensor.snapshot().lens_corr(1.8)
+        ###############
+        #寻找黄色物块
+        roi = (round(WINDOW_CENTER_X/2),round(WINDOW_CENTER_Y/2),WINDOW_CENTER_X,WINDOW_CENTER_Y)
+        #temp_threshold = img.get_histogram().get_threshold().value() #Otsu
 
-            #寻找色块后进入下一个模式
-            roi_2 = (0,round(7*WINDOW_CENTER_Y/4),WINDOW_CENTER_X*2,round(WINDOW_CENTER_Y/4))
-            blobs = img.find_blobs([THRESHOLD[1]], roi=roi_2, pixels_threshold=300, margin=5, merge=True)
-            if len(blobs):
-                state_flag
-            img.draw_rectangle(roi_2)
+        blobs = img.find_blobs([(30, 100, -15, 127, 20, 57)], roi=roi, area_threshold=600, merge=True)
+        if len(blobs):
+            for blob in blobs:
+                img.draw_rectangle(blob.rect())
+            ##############
+            #进入下一个模式
+            state_flag = 4
+            RES=2
 
-            img.draw_line(reg.line(),thickness=4)
+    elif state_flag == 4:
+
+        img = sensor.snapshot().lens_corr(1.55)
+        ###############
+        #寻找条形码并拍照
+        roi = (0,round(3*WINDOW_CENTER_Y/4),WINDOW_CENTER_X*2,round(WINDOW_CENTER_Y/2))
+
+        if NUM < 3:
+            codes = img.find_barcodes(roi=roi)
+            if len(codes):
+                for code in codes:
+                    img.draw_rectangle(code.rect())
+                    print(code)
+
+                sensor.snapshot().lens_corr(1.55).save("BAR_%s.jpg"%NUM)
+                NUM+=1
+
         else:
-            judge_stop()
+            state_flag = 6
+            NUM=0
+
+        ISO_Tune(len(codes))
+    elif state_flag == 5:
+
+        img = sensor.snapshot().lens_corr(1.55)
+        ###############
+        #寻找QR码并拍照
+        roi = (0,0,WINDOW_CENTER_X*2,WINDOW_CENTER_Y*2)
+
+        if NUM < 3:
+            codes = img.find_qrcodes(roi=roi)
+            if len(codes):
+                for code in codes:
+                    img.draw_rectangle(code.rect())
+                    print(code)
+
+                sensor.snapshot().lens_corr(1.55).save("QR_%s.jpg"%NUM)
+                NUM+=1
+
+        else:
+            state_flag = 6
+            NUM=0
+
+        ISO_Tune(len(codes))
+
 
     img.draw_rectangle(roi)
     img.draw_cross(WINDOW_CENTER_X, WINDOW_CENTER_Y)
     img.draw_string(2, 0, "GAIN: %s"%sensor.get_gain_db(),color=128,scale=2,mono_space=False)
     img.draw_string(2, 16, "FPS: %s"%clock.fps(),color=128,scale=2,mono_space=False)
     img.draw_string(2, 32, "STATE_FLAG: %s"%state_flag,color=128,scale=2,mono_space=False)
-    img.draw_string(2, 48, "THRESHOLD: %s"%temp_threshold,color=128,scale=2,mono_space=False)
-
+    #img.draw_string(2, 48, "THRESHOLD: %s"%temp_threshold,color=128,scale=2,mono_space=False)
+    img.draw_string(2, 80, "DISTANCE: %s"%wave_distance,color=128,scale=2,mono_space=False)
 
     saveVideo()
+    wave_distance_process()
+    print()
